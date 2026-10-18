@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "48694275906",
+    "firebase_url": "https://alerta-vecinal-coronel-default-rtdb.firebaseio.com",
+    "project_id": "alerta-vecinal-coronel",
+    "storage_bucket": "alerta-vecinal-coronel.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:48694275906:android:6c080786161758009ee2db",
+        "android_client_info": {
+          "package_name": "com.ichansteam.alertavecinal2"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC-6N3mPzQYwK9dKX-IBG4HP17lwJW3tWE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
