@@ -30,7 +30,10 @@ Thumbs.db
 *.ipr
 *.iws
 
-# Sensitive
+# Sensitive & Private
 .env
 .env.*
 !.env.example
+cotizacion*
+*.xlsx
+
