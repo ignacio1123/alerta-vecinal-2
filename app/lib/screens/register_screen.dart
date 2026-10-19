@@ -48,6 +48,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final _restorePinCtrl = TextEditingController();
 
   bool _isSaving = false;
+  bool _waitingForAdminCupo = false;
+  String _blockedAddress = '';
+  String _blockedHouse = '';
+  int _blockedCount = 3;
 
   @override
   void dispose() {
@@ -151,7 +155,24 @@ class _RegisterScreenState extends State<RegisterScreen> {
           final parts = dupMsg.split('::');
           final cCount = int.tryParse(parts.length > 1 ? parts[1] : '3') ?? 3;
           final cLimit = int.tryParse(parts.length > 2 ? parts[2] : '3') ?? 3;
-          await _showHouseLimitReachedDialog(cCount, cLimit, effectiveStreet, fullHouseNum);
+          final realtimeAuthorized = await _showHouseLimitReachedDialog(cCount, cLimit, effectiveStreet, fullHouseNum);
+          if (realtimeAuthorized) {
+            // El Administrador autorizó el cupo en tiempo real mientras el vecino miraba la pantalla
+            await _doRegisterNeighbor(
+              effectiveStreet: effectiveStreet,
+              fullHouseNum: fullHouseNum,
+              cleanPhone: cleanPhone,
+            );
+            return;
+          }
+          if (mounted) {
+            setState(() {
+              _waitingForAdminCupo = true;
+              _blockedAddress = effectiveStreet;
+              _blockedHouse = fullHouseNum;
+              _blockedCount = cCount;
+            });
+          }
           return;
         }
 
@@ -185,6 +206,32 @@ class _RegisterScreenState extends State<RegisterScreen> {
       }
 
       // 3. Registrar vecino con datos verificados
+      await _doRegisterNeighbor(
+        effectiveStreet: effectiveStreet,
+        fullHouseNum: fullHouseNum,
+        cleanPhone: cleanPhone,
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: Colors.red.shade800,
+            content: Text('Error al registrar: $e'),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  Future<void> _doRegisterNeighbor({
+    required String effectiveStreet,
+    required String fullHouseNum,
+    required String cleanPhone,
+  }) async {
+    setState(() => _isSaving = true);
+    try {
       await _service.registerNeighbor(
         firstName: _firstNameCtrl.text.trim(),
         lastName1: _lastName1Ctrl.text.trim(),
@@ -199,6 +246,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
       );
 
       if (!mounted) return;
+
+      setState(() {
+        _waitingForAdminCupo = false;
+        _blockedAddress = '';
+        _blockedHouse = '';
+      });
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -302,92 +355,203 @@ class _RegisterScreenState extends State<RegisterScreen> {
     }
   }
 
-  Future<void> _showHouseLimitReachedDialog(int currentCount, int limit, String address, String houseNumber) async {
+  Future<bool> _showHouseLimitReachedDialog(int currentCount, int limit, String address, String houseNumber) async {
     final rawAdminPhone = await _service.getAdminWhatsApp();
     final cleanAdminPhone = rawAdminPhone.replaceAll(RegExp(r'[^0-9]'), '');
     final effectiveAdminPhone = cleanAdminPhone.isNotEmpty ? cleanAdminPhone : '56921839786';
     final applicantName = '${_firstNameCtrl.text.trim()} ${_lastName1Ctrl.text.trim()}'.trim();
 
-    if (!mounted) return;
+    if (!mounted) return false;
 
-    await showDialog(
+    final result = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Row(
-          children: [
-            Icon(Icons.devices, color: Colors.orange, size: 26),
-            SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'Límite de Dispositivos por Casa',
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-              ),
-            ),
-          ],
-        ),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Colors.amber.shade50,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.amber.shade300),
+      barrierDismissible: false,
+      builder: (ctx) {
+        return StreamBuilder<int>(
+          stream: _service.watchHouseDeviceLimit(address, houseNumber),
+          initialData: limit,
+          builder: (ctx, snap) {
+            final liveLimit = snap.data ?? limit;
+            final isAuthorized = liveLimit > currentCount;
+
+            if (isAuthorized) {
+              return AlertDialog(
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                title: const Row(
+                  children: [
+                    Icon(Icons.check_circle_rounded, color: Colors.green, size: 28),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '¡Cupo Habilitado en Tiempo Real!',
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.green),
+                      ),
+                    ),
+                  ],
                 ),
+                content: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.green.shade50,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: Colors.green.shade300),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '🏠 $address #$houseNumber',
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: AppColors.brandNavy),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '✓ El Administrador autorizó este dispositivo. Capacidad ampliada a $liveLimit teléfonos.',
+                              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.green.shade900),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      const Text(
+                        '¡Excelente! El cambio se aplicó en tiempo real. No necesitas salir ni reiniciar la app. Pulsa el botón abajo para completar tu registro de inmediato.',
+                        style: TextStyle(fontSize: 12.5, height: 1.35),
+                      ),
+                    ],
+                  ),
+                ),
+                actions: [
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.sageGreen,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      onPressed: () => Navigator.pop(ctx, true),
+                      icon: const Icon(Icons.check, size: 20),
+                      label: const Text(
+                        'COMPLETAR MI REGISTRO AHORA',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            }
+
+            return AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: const Row(
+                children: [
+                  Icon(Icons.devices, color: Colors.orange, size: 26),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Límite de Dispositivos por Casa',
+                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ),
+              content: SingleChildScrollView(
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      '🏠 $address #$houseNumber',
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: AppColors.brandNavy),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Colors.amber.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.amber.shade300),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '🏠 $address #$houseNumber',
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: AppColors.brandNavy),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            'Capacidad utilizada: $currentCount de $liveLimit teléfonos registrados.',
+                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.amber.shade900),
+                          ),
+                        ],
+                      ),
                     ),
-                    const SizedBox(height: 3),
-                    Text(
-                      'Capacidad utilizada: $currentCount de $limit teléfonos registrados.',
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.amber.shade900),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'El plan comunitario estándar cubre hasta 3 teléfonos por vivienda (3 familiares incluidos en los \$30.000).\n\n'
+                      'Para habilitar un 4° teléfono adicional (o más familiares para tu hogar), se debe abonar la tarifa única de \$5.000 CLP.\n\n'
+                      'Una vez cancelado el monto, el Administrador habilitará el nuevo cupo en el sistema y verás el cambio aquí en tiempo real sin salir de la aplicación.',
+                      style: TextStyle(fontSize: 12.5, height: 1.35),
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.blue.shade200),
+                      ),
+                      child: const Row(
+                        children: [
+                          SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandNavy),
+                          ),
+                          SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Escuchando activación del Administrador en vivo...',
+                              style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: AppColors.brandNavy),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
-              const Text(
-                'El plan comunitario estándar cubre hasta 3 teléfonos por vivienda (3 familiares incluidos en los \$30.000).\n\n'
-                'Para habilitar un 4° teléfono adicional (o más familiares para tu hogar), se debe abonar la tarifa única de \$5.000 CLP.\n\n'
-                'Una vez cancelado el monto, el Administrador habilitará el nuevo cupo en el sistema y podrás registrar este teléfono al instante.',
-                style: TextStyle(fontSize: 12.5, height: 1.35),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Entendido'),
-          ),
-          ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF25D366),
-              foregroundColor: Colors.white,
-            ),
-            onPressed: () async {
-              Navigator.pop(ctx);
-              final msg = 'Hola Administrador, necesito habilitar un cupo adicional (+1 teléfono por \$5.000 CLP) para mi vivienda en $address #$houseNumber a nombre de $applicantName.';
-              final uri = Uri.parse('https://wa.me/$effectiveAdminPhone?text=${Uri.encodeComponent(msg)}');
-              if (await canLaunchUrl(uri)) {
-                await launchUrl(uri, mode: LaunchMode.externalApplication);
-              }
-            },
-            icon: const Icon(Icons.chat, size: 16),
-            label: const Text('Contactar Soporte WhatsApp (\$5.000)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
-          ),
-        ],
-      ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cerrar y Esperar'),
+                ),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF25D366),
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: () async {
+                    final msg = 'Hola Administrador, necesito habilitar un cupo adicional (+1 teléfono por \$5.000 CLP) para mi vivienda en $address #$houseNumber a nombre de $applicantName.';
+                    final uri = Uri.parse('https://wa.me/$effectiveAdminPhone?text=${Uri.encodeComponent(msg)}');
+                    if (await canLaunchUrl(uri)) {
+                      await launchUrl(uri, mode: LaunchMode.externalApplication);
+                    }
+                  },
+                  icon: const Icon(Icons.chat, size: 16),
+                  label: const Text('Contactar Soporte WhatsApp (\$5.000)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
+
+    return result == true;
   }
 
   Future<void> _showSmartRecoveryDialog(Map<String, dynamic> existing) async {
@@ -1263,6 +1427,109 @@ class _RegisterScreenState extends State<RegisterScreen> {
                             validator: NeighborhoodLocations.validatePin,
                           ),
                           const SizedBox(height: 20),
+
+                          if (_waitingForAdminCupo && _blockedAddress.isNotEmpty) ...[
+                            StreamBuilder<int>(
+                              stream: _service.watchHouseDeviceLimit(_blockedAddress, _blockedHouse),
+                              initialData: _blockedCount,
+                              builder: (context, snapshot) {
+                                final liveLimit = snapshot.data ?? _blockedCount;
+                                final isAuthorized = liveLimit > _blockedCount;
+
+                                if (isAuthorized) {
+                                  return Container(
+                                    margin: const EdgeInsets.only(bottom: 16),
+                                    padding: const EdgeInsets.all(14),
+                                    decoration: BoxDecoration(
+                                      color: Colors.green.shade50,
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(color: Colors.green.shade400, width: 1.5),
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
+                                          children: [
+                                            const Icon(Icons.check_circle_rounded, color: Colors.green, size: 24),
+                                            const SizedBox(width: 8),
+                                            Expanded(
+                                              child: Text(
+                                                '¡CUPO HABILITADO EN TIEMPO REAL!',
+                                                style: TextStyle(
+                                                  fontSize: 13,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: Colors.green.shade800,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          'El Administrador habilitó tu cupo ($liveLimit teléfonos permitidos). No necesitas reiniciar la app ni volver a cargar tus datos. Pulsa el botón abajo para ingresar ahora.',
+                                          style: TextStyle(fontSize: 12, color: Colors.green.shade900, height: 1.3),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                }
+
+                                return Container(
+                                  margin: const EdgeInsets.only(bottom: 16),
+                                  padding: const EdgeInsets.all(12),
+                                  decoration: BoxDecoration(
+                                    color: Colors.amber.shade50,
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(color: Colors.amber.shade400, width: 1.2),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          const SizedBox(
+                                            width: 14,
+                                            height: 14,
+                                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.amber),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              'Esperando activación del Administrador...',
+                                              style: TextStyle(
+                                                fontSize: 12.5,
+                                                fontWeight: FontWeight.bold,
+                                                color: Colors.amber.shade900,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        'Vivienda: $_blockedAddress #$_blockedHouse ($_blockedCount teléfonos activos).\n'
+                                        'Al pagar \$5.000 y ser habilitado en el panel, esta pantalla se activará en tiempo real.',
+                                        style: TextStyle(fontSize: 11.5, color: Colors.brown.shade800, height: 1.3),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      InkWell(
+                                        onTap: () => _showHouseLimitReachedDialog(_blockedCount, liveLimit, _blockedAddress, _blockedHouse),
+                                        child: const Text(
+                                          '👉 Ver detalles o contactar por WhatsApp',
+                                          style: TextStyle(
+                                            fontSize: 11.5,
+                                            fontWeight: FontWeight.bold,
+                                            color: AppColors.brandNavy,
+                                            decoration: TextDecoration.underline,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
 
                           SizedBox(
                             width: double.infinity,

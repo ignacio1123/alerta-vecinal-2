@@ -2455,26 +2455,18 @@ class _AdminScreenState extends State<AdminScreen> with SingleTickerProviderStat
 
     await showDialog(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDlgState) {
-          return FutureBuilder<List<dynamic>>(
-            future: Future.wait([
-              service.getNeighborsInHouse(addr, house),
-              service.getHouseDeviceLimit(addr, house),
-            ]),
-            builder: (ctx, snapshot) {
-              if (!snapshot.hasData) {
-                return const AlertDialog(
-                  content: SizedBox(
-                    height: 100,
-                    child: Center(child: CircularProgressIndicator()),
-                  ),
-                );
-              }
+      builder: (ctx) => StreamBuilder<int>(
+        stream: service.watchHouseDeviceLimit(addr, house),
+        initialData: 3,
+        builder: (ctx, limitSnap) {
+          final limit = limitSnap.data ?? 3;
+          final extraPaid = limit > 3 ? (limit - 3) : 0;
 
-              final inHouse = snapshot.data![0] as List<Map<String, dynamic>>;
-              final limit = snapshot.data![1] as int;
-              final extraPaid = limit > 3 ? (limit - 3) : 0;
+          return StreamBuilder<List<Map<String, dynamic>>>(
+            stream: service.watchNeighborsInHouse(addr, house),
+            initialData: const [],
+            builder: (ctx, neighborsSnap) {
+              final inHouse = neighborsSnap.data ?? [];
 
               return AlertDialog(
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -2614,13 +2606,11 @@ class _AdminScreenState extends State<AdminScreen> with SingleTickerProviderStat
                               newLimit,
                               extraPaidCount: (newLimit - 3),
                             );
-                            setDlgState(() {});
                             if (mounted) {
-                              setState(() {});
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
                                   backgroundColor: const Color(0xFF0D9488),
-                                  content: Text('✓ ¡Cupo ampliado! Ahora $addr #$house puede registrar hasta $newLimit teléfonos.'),
+                                  content: Text('✓ ¡Cupo ampliado en tiempo real! Ahora $addr #$house puede registrar hasta $newLimit teléfonos.'),
                                 ),
                               );
                             }
@@ -2646,8 +2636,6 @@ class _AdminScreenState extends State<AdminScreen> with SingleTickerProviderStat
                                 newLimit,
                                 extraPaidCount: (newLimit > 3 ? (newLimit - 3) : 0),
                               );
-                              setDlgState(() {});
-                              if (mounted) setState(() {});
                             },
                             icon: const Icon(Icons.remove_circle_outline, size: 14),
                             label: const Text('Reducir 1 cupo', style: TextStyle(fontSize: 11)),

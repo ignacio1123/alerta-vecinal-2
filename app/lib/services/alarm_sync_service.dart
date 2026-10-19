@@ -481,7 +481,25 @@ class AlarmSyncService {
     return s;
   }
 
+  static String extractCleanStreet(String raw) {
+    var s = normalizeText(raw);
+    s = s.replaceAll(RegExp(r'^(pasaje|pje\.?|calle|clle\.?|avenida|avda\.?|av\.)\s+'), '');
+    return s.trim();
+  }
+
+  static String extractCleanHouseNumber(String raw) {
+    final match = RegExp(r'\d+').firstMatch(raw);
+    if (match != null) return match.group(0)!;
+    return normalizeText(raw).replaceAll(RegExp(r'[^a-z0-9]'), '');
+  }
+
   static String buildHouseKey(String address, String houseNumber) {
+    final a = extractCleanStreet(address).replaceAll(RegExp(r'[^a-z0-9]'), '_').replaceAll(RegExp(r'_+'), '_').trim();
+    final h = extractCleanHouseNumber(houseNumber).replaceAll(RegExp(r'[^a-z0-9]'), '_').trim();
+    return '${a}_$h';
+  }
+
+  static String buildLegacyHouseKey(String address, String houseNumber) {
     final a = normalizeText(address).replaceAll(RegExp(r'[^a-z0-9]'), '_');
     final h = normalizeText(houseNumber).replaceAll(RegExp(r'[^a-z0-9]'), '_');
     return '${a}_$h';
@@ -492,8 +510,9 @@ class AlarmSyncService {
       final snap = await _db.ref('vecinos').get().timeout(const Duration(seconds: 6));
       if (!snap.exists || snap.value is! Map) return [];
       final neighbors = Map<dynamic, dynamic>.from(snap.value as Map);
-      final reqAddr = normalizeText(address);
-      final reqHouse = normalizeText(houseNumber);
+      final reqCleanHouse = extractCleanHouseNumber(houseNumber);
+      final reqCleanStreet = extractCleanStreet(address);
+      final reqAddrWords = normalizeText(address).split(' ').where((w) => w.length > 2).toSet();
 
       final List<Map<String, dynamic>> list = [];
       for (final entry in neighbors.entries) {
@@ -502,18 +521,22 @@ class AlarmSyncService {
         final map = Map<String, dynamic>.from(val);
         map['id'] = entry.key.toString();
 
-        final existAddr = normalizeText('${map['direccion'] ?? map['calle'] ?? ''}');
-        final existHouse = normalizeText('${map['numeroCasa'] ?? map['casa'] ?? ''}');
+        final existAddr = '${map['direccion'] ?? map['calle'] ?? ''}';
+        final existHouse = '${map['numeroCasa'] ?? map['casa'] ?? ''}';
+        final existCleanHouse = extractCleanHouseNumber(existHouse);
+        final existCleanStreet = extractCleanStreet(existAddr);
+        final existAddrWords = normalizeText(existAddr).split(' ').where((w) => w.length > 2).toSet();
 
-        if (existHouse == reqHouse) {
-          final wordsReq = reqAddr.split(' ').where((w) => w.length > 2).toSet();
-          final wordsExist = existAddr.split(' ').where((w) => w.length > 2).toSet();
-          final sharesWord = wordsReq.intersection(wordsExist).isNotEmpty ||
-              reqAddr.contains(existAddr) ||
-              existAddr.contains(reqAddr);
-          if (sharesWord) {
-            list.add(map);
-          }
+        final isSameHouse = reqCleanHouse.isNotEmpty && reqCleanHouse == existCleanHouse;
+        final isSameStreet = reqCleanStreet.isNotEmpty && (
+            reqCleanStreet == existCleanStreet ||
+            reqCleanStreet.contains(existCleanStreet) ||
+            existCleanStreet.contains(reqCleanStreet) ||
+            reqAddrWords.intersection(existAddrWords).isNotEmpty
+        );
+
+        if (isSameHouse && isSameStreet) {
+          list.add(map);
         }
       }
       return list;
@@ -523,13 +546,84 @@ class AlarmSyncService {
     }
   }
 
+  Stream<List<Map<String, dynamic>>> watchNeighborsInHouse(String address, String houseNumber) {
+    final reqCleanHouse = extractCleanHouseNumber(houseNumber);
+    final reqCleanStreet = extractCleanStreet(address);
+    final reqAddrWords = normalizeText(address).split(' ').where((w) => w.length > 2).toSet();
+
+    return _db.ref('vecinos').onValue.map((event) {
+      if (!event.snapshot.exists || event.snapshot.value is! Map) return [];
+      final neighbors = Map<dynamic, dynamic>.from(event.snapshot.value as Map);
+
+      final List<Map<String, dynamic>> list = [];
+      for (final entry in neighbors.entries) {
+        final val = entry.value;
+        if (val is! Map) continue;
+        final map = Map<String, dynamic>.from(val);
+        map['id'] = entry.key.toString();
+
+        final existAddr = '${map['direccion'] ?? map['calle'] ?? ''}';
+        final existHouse = '${map['numeroCasa'] ?? map['casa'] ?? ''}';
+        final existCleanHouse = extractCleanHouseNumber(existHouse);
+        final existCleanStreet = extractCleanStreet(existAddr);
+        final existAddrWords = normalizeText(existAddr).split(' ').where((w) => w.length > 2).toSet();
+
+        final isSameHouse = reqCleanHouse.isNotEmpty && reqCleanHouse == existCleanHouse;
+        final isSameStreet = reqCleanStreet.isNotEmpty && (
+            reqCleanStreet == existCleanStreet ||
+            reqCleanStreet.contains(existCleanStreet) ||
+            existCleanStreet.contains(reqCleanStreet) ||
+            reqAddrWords.intersection(existAddrWords).isNotEmpty
+        );
+
+        if (isSameHouse && isSameStreet) {
+          list.add(map);
+        }
+      }
+      return list;
+    });
+  }
+
   Future<int> getHouseDeviceLimit(String address, String houseNumber) async {
     try {
       final key = buildHouseKey(address, houseNumber);
+      final legacyKey = buildLegacyHouseKey(address, houseNumber);
+
+      // 1. Revisar clave canónica (ej: catrileo_2430)
       final snap = await _db.ref('config/casas_cupos/$key/limite').get().timeout(const Duration(seconds: 4));
       if (snap.exists && snap.value is num) {
         final lim = (snap.value as num).toInt();
         if (lim >= 3) return lim;
+      }
+
+      // 2. Revisar clave legada (ej: pasaje_catrileo_2430)
+      if (legacyKey != key) {
+        final legacySnap = await _db.ref('config/casas_cupos/$legacyKey/limite').get().timeout(const Duration(seconds: 4));
+        if (legacySnap.exists && legacySnap.value is num) {
+          final lim = (legacySnap.value as num).toInt();
+          if (lim >= 3) return lim;
+        }
+      }
+
+      // 3. Revisar nodo completo casas_cupos por coincidencia de dirección
+      final allSnap = await _db.ref('config/casas_cupos').get().timeout(const Duration(seconds: 4));
+      if (allSnap.exists && allSnap.value is Map) {
+        final allMap = Map<dynamic, dynamic>.from(allSnap.value as Map);
+        final reqCleanH = extractCleanHouseNumber(houseNumber);
+        final reqCleanS = extractCleanStreet(address);
+
+        for (final entry in allMap.entries) {
+          final v = entry.value;
+          if (v is! Map) continue;
+          final h = extractCleanHouseNumber('${v['numeroCasa'] ?? ''}');
+          final s = extractCleanStreet('${v['direccion'] ?? ''}');
+          if (h.isNotEmpty && h == reqCleanH && (s == reqCleanS || s.contains(reqCleanS) || reqCleanS.contains(s))) {
+            if (v['limite'] is num) {
+              final lim = (v['limite'] as num).toInt();
+              if (lim >= 3) return lim;
+            }
+          }
+        }
       }
     } catch (e) {
       debugPrint('Error leyendo límite de dispositivos de la casa: $e');
@@ -537,15 +631,64 @@ class AlarmSyncService {
     return 3; // Plan comunitario estándar: hasta 3 teléfonos incluidos por casa
   }
 
+  Stream<int> watchHouseDeviceLimit(String address, String houseNumber) {
+    final key = buildHouseKey(address, houseNumber);
+    final legacyKey = buildLegacyHouseKey(address, houseNumber);
+    final reqCleanH = extractCleanHouseNumber(houseNumber);
+    final reqCleanS = extractCleanStreet(address);
+
+    return _db.ref('config/casas_cupos').onValue.map((event) {
+      if (!event.snapshot.exists || event.snapshot.value is! Map) return 3;
+      final map = Map<dynamic, dynamic>.from(event.snapshot.value as Map);
+
+      // 1. Coincidencia directa por clave canónica
+      if (map.containsKey(key) && map[key] is Map && map[key]['limite'] is num) {
+        final lim = (map[key]['limite'] as num).toInt();
+        if (lim >= 3) return lim;
+      }
+
+      // 2. Coincidencia por clave legada
+      if (map.containsKey(legacyKey) && map[legacyKey] is Map && map[legacyKey]['limite'] is num) {
+        final lim = (map[legacyKey]['limite'] as num).toInt();
+        if (lim >= 3) return lim;
+      }
+
+      // 3. Coincidencia semántica en el mapa de cupos
+      for (final entry in map.entries) {
+        final val = entry.value;
+        if (val is! Map) continue;
+        final h = extractCleanHouseNumber('${val['numeroCasa'] ?? ''}');
+        final s = extractCleanStreet('${val['direccion'] ?? ''}');
+        if (h.isNotEmpty && h == reqCleanH && (s == reqCleanS || s.contains(reqCleanS) || reqCleanS.contains(s))) {
+          if (val['limite'] is num) {
+            final lim = (val['limite'] as num).toInt();
+            if (lim >= 3) return lim;
+          }
+        }
+      }
+      return 3;
+    });
+  }
+
   Future<void> setHouseDeviceLimit(String address, String houseNumber, int newLimit, {int extraPaidCount = 0}) async {
     final key = buildHouseKey(address, houseNumber);
-    await _db.ref('config/casas_cupos/$key').update({
+    final legacyKey = buildLegacyHouseKey(address, houseNumber);
+
+    final payload = {
       'limite': newLimit,
       'direccion': address,
       'numeroCasa': houseNumber,
       'extraPaidCount': extraPaidCount,
       'updatedAt': ServerValue.timestamp,
-    }).timeout(const Duration(seconds: 6));
+    };
+
+    final futures = [
+      _db.ref('config/casas_cupos/$key').update(payload).timeout(const Duration(seconds: 6)),
+    ];
+    if (legacyKey != key) {
+      futures.add(_db.ref('config/casas_cupos/$legacyKey').update(payload).timeout(const Duration(seconds: 6)));
+    }
+    await Future.wait(futures);
   }
 
   Future<(bool, String?)> checkDuplicateNeighbor({
@@ -566,7 +709,6 @@ class AlarmSyncService {
       final reqL1 = normalizeText(lastName1);
       final reqL2 = normalizeText(lastName2);
       final reqAddr = normalizeText(address);
-      final reqHouse = normalizeText(houseNumber);
       final cleanReqPhone = (phone ?? '').replaceAll(RegExp(r'[^0-9]'), '');
 
       int houseCount = 0;
@@ -601,14 +743,24 @@ class AlarmSyncService {
           );
         }
 
-        // 3. Contar residentes que comparten la misma vivienda
-        if (reqHouse.isNotEmpty && reqHouse == existingHouse) {
+        // 3. Contar residentes que comparten la misma vivienda (solo cuentas activas)
+        if (val['activo'] != false) {
+          final existCleanHouse = extractCleanHouseNumber(existingHouse);
+          final existCleanStreet = extractCleanStreet(existingAddr);
+          final reqCleanHouse = extractCleanHouseNumber(houseNumber);
+          final reqCleanStreet = extractCleanStreet(address);
+
+          final isSameHouse = reqCleanHouse.isNotEmpty && reqCleanHouse == existCleanHouse;
           final wordsReqAddr = reqAddr.split(' ').where((w) => w.length > 2).toSet();
           final wordsExistAddr = existingAddr.split(' ').where((w) => w.length > 2).toSet();
-          final sharesAddrWord = wordsReqAddr.intersection(wordsExistAddr).isNotEmpty ||
-              reqAddr.contains(existingAddr) ||
-              existingAddr.contains(reqAddr);
-          if (sharesAddrWord) {
+          final sharesAddr = reqCleanStreet.isNotEmpty && (
+              reqCleanStreet == existCleanStreet ||
+              reqCleanStreet.contains(existCleanStreet) ||
+              existCleanStreet.contains(reqCleanStreet) ||
+              wordsReqAddr.intersection(wordsExistAddr).isNotEmpty
+          );
+
+          if (isSameHouse && sharesAddr) {
             houseCount++;
           }
         }
