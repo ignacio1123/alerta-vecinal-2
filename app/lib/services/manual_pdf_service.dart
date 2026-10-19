@@ -193,7 +193,7 @@ class ManualPdfService {
               _buildCalloutItem(
                 number: '1',
                 title: 'OPCION 1: "EN MI DOMICILIO REGISTRADO"',
-                action: 'Selecciona tu casa predeterminada (ej: Catrileo #2430) en 1 segundo.',
+                action: 'Selecciona tu casa predeterminada (ej: Pasaje Los Aromos #142) en 1 segundo.',
                 instruction: 'Es la opcion mas rapida y recomendada cuando la emergencia ocurre en tu propio hogar.',
                 badgeColor: PdfColors.indigo900,
               ),

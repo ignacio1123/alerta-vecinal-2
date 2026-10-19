@@ -47,7 +47,7 @@ A continuación se detalla el funcionamiento completo del sistema utilizando las
   <img src="app/assets/images/manual/vecino_inicio_superior.jpg" alt="Vista Principal del Vecino" width="380" />
 </div>
 
-* **Identificación Comunitaria:** En la barra superior el vecino visualiza el logo oficial junto a su dirección física registrada (ej. `Catrileo #2430`).
+* **Identificación Comunitaria:** En la barra superior el vecino visualiza el logo oficial junto a su dirección física registrada (ej. `Pasaje Los Aromos #142`).
 * **Botón de Ajustes (⚙️):** Permite cambiar con un toque entre **Modo Claro (Día)** y **Modo Oscuro (Noche)** para proteger la vista de los adultos mayores.
 * **Ficha de Estado del Residente:** Indica `● EN LÍNEA • PROTEGIDO`. Cuenta con un lápiz de edición (`✏️`) protegido con un límite estricto de 3 intentos para evitar suplantaciones de identidad.
 * **Centrales de Emergencia de 1-Toque (Llamada Inmediata):** Botones de marcado rápido que conectan de inmediato sin buscar en la agenda:
