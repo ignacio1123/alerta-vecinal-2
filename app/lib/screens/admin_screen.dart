@@ -2433,9 +2433,11 @@ class _AdminScreenState extends State<AdminScreen> with SingleTickerProviderStat
   }
 
   String _getDefaultImprovementNotes() {
-    return '• Soporte hasta 3 teléfonos por vivienda y cupos adicionales (\$5.000)\n'
-        '• Descarga directa de expedientes policiales en PDF\n'
-        '• Sirena a máximo volumen y manuales de usuario HD';
+    return '• Optimización para Datos Móviles (3G/4G/5G): Cero lag y ahorro del 80% en consumo de megas\n'
+        '• Carga instantánea con caché offline (pantallas y botones responden en 0 segundos)\n'
+        '• Activación de 4° teléfono y cupos adicionales en tiempo real sin reiniciar la app\n'
+        '• Envío ultra rápido de alarmas de emergencia y localización GPS sin esperas\n'
+        '• Expedientes policiales en PDF y manuales de usuario HD';
   }
 
   void _appendNote(String note) {
@@ -4135,6 +4137,10 @@ class _AdminScreenState extends State<AdminScreen> with SingleTickerProviderStat
                       avatar: const Icon(Icons.auto_awesome, size: 14, color: Colors.amber),
                       label: const Text('Auto-Novedades', style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold)),
                       onPressed: () => setState(() => _updateNotesCtrl.text = _getDefaultImprovementNotes()),
+                    ),
+                    ActionChip(
+                      label: const Text('+ Datos Móviles / Cero Lag', style: TextStyle(fontSize: 10.5)),
+                      onPressed: () => _appendNote('Optimización para Datos Móviles (3G/4G/5G): Cero lag y ahorro del 80% en consumo de megas'),
                     ),
                     ActionChip(
                       label: const Text('+ 3 Teléfonos/Casa', style: TextStyle(fontSize: 10.5)),
