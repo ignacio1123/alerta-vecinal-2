@@ -54,12 +54,20 @@ class _AdminScreenState extends State<AdminScreen> with SingleTickerProviderStat
   }
 
   Future<void> _loadSystemConfig() async {
-    final wp = await service.getAdminWhatsApp();
-    final qr = await service.getApkDownloadUrl();
-    final seg = await service.getSeguridadCiudadanaPhone();
-    final bat = await NativeAlertService.isIgnoringBatteryOptimizations();
-    final notice = await service.getLatestCommunityNotice();
-    final updateInfo = await service.getLatestAppUpdateInfo();
+    final results = await Future.wait([
+      service.getAdminWhatsApp(),
+      service.getApkDownloadUrl(),
+      service.getSeguridadCiudadanaPhone(),
+      NativeAlertService.isIgnoringBatteryOptimizations(),
+      service.getLatestCommunityNotice(),
+      service.getLatestAppUpdateInfo(),
+    ]);
+    final wp = results[0] as String;
+    final qr = results[1] as String;
+    final seg = results[2] as String;
+    final bat = results[3] as bool;
+    final notice = results[4] as Map<String, dynamic>?;
+    final updateInfo = results[5] as Map<String, dynamic>?;
     if (mounted) {
       setState(() {
         _whatsappCtrl.text = wp;

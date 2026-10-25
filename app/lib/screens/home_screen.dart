@@ -110,7 +110,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<Position?> _gps({
     LocationAccuracy desiredAccuracy = LocationAccuracy.best,
-    Duration timeout = const Duration(seconds: 12),
+    Duration timeout = const Duration(seconds: 4),
   }) async {
     try {
       final serviceEnabled = await Geolocator.isLocationServiceEnabled();
@@ -122,6 +122,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }
       if (permission == LocationPermission.deniedForever) return null;
 
+      // 1. Obtener la última posición conocida de inmediato (0 ms de espera)
+      final lastKnown = await Geolocator.getLastKnownPosition();
+
+      // 2. Intentar posición precisa actual con timeout optimizado para no demorar alarmas
       final LocationSettings settings = Platform.isAndroid
           ? AndroidSettings(
               accuracy: desiredAccuracy,
@@ -139,18 +143,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         final pos = await Geolocator.getCurrentPosition(locationSettings: settings);
         return pos;
       } catch (_) {
-        if (Platform.isAndroid) {
-          try {
-            final rawGpsSettings = AndroidSettings(
-              accuracy: desiredAccuracy,
-              distanceFilter: 0,
-              forceLocationManager: true,
-              timeLimit: const Duration(seconds: 8),
-            );
-            return await Geolocator.getCurrentPosition(locationSettings: rawGpsSettings);
-          } catch (_) {}
-        }
-        return await Geolocator.getLastKnownPosition();
+        return lastKnown;
       }
     } catch (_) {
       return null;

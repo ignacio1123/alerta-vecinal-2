@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'screens/home_screen.dart';
 import 'screens/register_screen.dart';
@@ -18,6 +19,14 @@ void main() async {
       storageBucket: 'alerta-vecinal-coronel.firebasestorage.app',
     ),
   );
+
+  // Habilitar persistencia offline en disco para respuesta inmediata en datos móviles
+  try {
+    FirebaseDatabase.instance.setPersistenceEnabled(true);
+    FirebaseDatabase.instance.setPersistenceCacheSizeBytes(50 * 1024 * 1024); // 50MB
+  } catch (e) {
+    debugPrint('Firebase Persistence notice: $e');
+  }
 
   // Inicializar tema guardado (claro u oscuro)
   await ThemeService().init();

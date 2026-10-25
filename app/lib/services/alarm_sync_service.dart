@@ -18,16 +18,24 @@ void startForegroundTaskCallback() {
 }
 
 class AlertTaskHandler extends TaskHandler {
+  http.Client? _client;
+  static final Uri _alertUrl = Uri.parse('https://alerta-vecinal-coronel-default-rtdb.firebaseio.com/emergenciaActual.json');
+
   @override
-  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {}
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+    _client = http.Client();
+  }
 
   @override
   void onRepeatEvent(DateTime timestamp) async {
-    // Sondeo de seguridad en segundo plano cada 3.5 segundos
-    // Permite detectar alertas incluso si el socket de Firebase entró en reposo por Doze Mode
+    // Sondeo de seguridad en segundo plano con cliente HTTP persistente (Keep-Alive)
+    // Permite detectar alertas con consumo mínimo de datos móviles y sin saturar la red celular
     try {
-      final url = Uri.parse('https://alerta-vecinal-coronel-default-rtdb.firebaseio.com/emergenciaActual.json');
-      final res = await http.get(url).timeout(const Duration(seconds: 4));
+      _client ??= http.Client();
+      final res = await _client!.get(
+        _alertUrl,
+        headers: const {'Connection': 'keep-alive', 'Accept': 'application/json'},
+      ).timeout(const Duration(seconds: 4));
       if (res.statusCode == 200 && res.body.isNotEmpty && res.body != 'null') {
         final data = jsonDecode(res.body);
         if (data is Map && data['tipo'] != null) {
@@ -72,6 +80,10 @@ class AlertTaskHandler extends TaskHandler {
 
   @override
   Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {
+    try {
+      _client?.close();
+      _client = null;
+    } catch (_) {}
     await AlarmPlayerService().stopAlarm();
   }
 
@@ -151,6 +163,12 @@ class AlarmSyncService {
   String? neighborId;
   List<EmergencyButton> buttons = const [];
 
+  bool _cachedIsActive = true;
+  String _cachedInactiveReason = '';
+  String _cachedAdminWhatsApp = '+56912345678';
+  String _cachedApkDownloadUrl = '';
+  String _cachedSeguridadPhone = '1414';
+
   String? _lastDismissedAlertId;
   String? _lastSilencedAlertId;
   String? _lastSoundedAlertId;
@@ -220,17 +238,15 @@ class AlarmSyncService {
     _dismissedUpdateVersion = prefs.getInt('dismissed_update_version') ?? 0;
     await AlarmPlayerService().init();
 
-    // Habilitar persistencia local y sincronización continua en caché
-    try {
-      _db.setPersistenceEnabled(true);
-    } catch (e) {
-      debugPrint('Firebase Persistence notice: $e');
-    }
-
+    // Sincronización continua en caché para respuesta instantánea en datos móviles
     try {
       _db.ref('emergenciaActual').keepSynced(true);
       _db.ref('botones').keepSynced(true);
       _db.ref('comunicados/actual').keepSynced(true);
+      _db.ref('config').keepSynced(true);
+      if (neighborId != null && neighborId!.isNotEmpty) {
+        _db.ref('vecinos/$neighborId').keepSynced(true);
+      }
     } catch (e) {
       debugPrint('keepSynced notice: $e');
     }
@@ -278,7 +294,7 @@ class AlarmSyncService {
         showNotification: false,
       ),
       foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.repeat(3500),
+        eventAction: ForegroundTaskEventAction.repeat(5000),
         autoRunOnBoot: true,
         autoRunOnMyPackageReplaced: true,
         allowWakeLock: true,
@@ -467,6 +483,44 @@ class AlarmSyncService {
         } catch (_) {}
       }
     });
+
+    // Escuchar configuración global (admin, teléfono seguridad, etc.) para servir en caché instantánea
+    _db.ref('config').onValue.listen((event) {
+      if (event.snapshot.exists && event.snapshot.value is Map) {
+        final m = Map<dynamic, dynamic>.from(event.snapshot.value as Map);
+        if (m['admin_whatsapp'] != null) {
+          _cachedAdminWhatsApp = m['admin_whatsapp'].toString().trim();
+        }
+        if (m['apk_download_url'] != null) {
+          _cachedApkDownloadUrl = convertDriveToDirectDownload(m['apk_download_url'].toString().trim());
+        }
+        if (m['telefono_seguridad'] != null) {
+          _cachedSeguridadPhone = m['telefono_seguridad'].toString().trim();
+        }
+      }
+    });
+
+    // Escuchar estado activo/inactivo del vecino actual en tiempo real
+    if (neighborId != null && neighborId!.isNotEmpty) {
+      _db.ref('vecinos/$neighborId').onValue.listen((event) {
+        if (event.snapshot.exists && event.snapshot.value is Map) {
+          final data = Map<dynamic, dynamic>.from(event.snapshot.value as Map);
+          if (data['activo'] == false) {
+            _cachedIsActive = false;
+            _cachedInactiveReason = 'Tu cuenta ha sido desactivada por la administración comunitaria.';
+          } else {
+            final trial = getTrialStatus(data);
+            if (trial['isExpired'] == true) {
+              _cachedIsActive = false;
+              _cachedInactiveReason = 'Tu período de prueba gratuito de 1 mes ha finalizado.\n\nPara seguir protegido y hacer sonar la alarma, solicita al Administrador que active tu Plan Definitivo.';
+            } else {
+              _cachedIsActive = true;
+              _cachedInactiveReason = '';
+            }
+          }
+        }
+      });
+    }
   }
 
   static String normalizeText(String input) {
@@ -588,30 +642,27 @@ class AlarmSyncService {
     try {
       final key = buildHouseKey(address, houseNumber);
       final legacyKey = buildLegacyHouseKey(address, houseNumber);
+      final reqCleanH = extractCleanHouseNumber(houseNumber);
+      final reqCleanS = extractCleanStreet(address);
 
-      // 1. Revisar clave canónica (ej: catrileo_2430)
-      final snap = await _db.ref('config/casas_cupos/$key/limite').get().timeout(const Duration(seconds: 4));
-      if (snap.exists && snap.value is num) {
-        final lim = (snap.value as num).toInt();
-        if (lim >= 3) return lim;
-      }
-
-      // 2. Revisar clave legada (ej: pasaje_catrileo_2430)
-      if (legacyKey != key) {
-        final legacySnap = await _db.ref('config/casas_cupos/$legacyKey/limite').get().timeout(const Duration(seconds: 4));
-        if (legacySnap.exists && legacySnap.value is num) {
-          final lim = (legacySnap.value as num).toInt();
-          if (lim >= 3) return lim;
-        }
-      }
-
-      // 3. Revisar nodo completo casas_cupos por coincidencia de dirección
-      final allSnap = await _db.ref('config/casas_cupos').get().timeout(const Duration(seconds: 4));
+      // Una sola consulta consolidada al nodo de cupos con timeout rápido
+      final allSnap = await _db.ref('config/casas_cupos').get().timeout(const Duration(seconds: 3));
       if (allSnap.exists && allSnap.value is Map) {
         final allMap = Map<dynamic, dynamic>.from(allSnap.value as Map);
-        final reqCleanH = extractCleanHouseNumber(houseNumber);
-        final reqCleanS = extractCleanStreet(address);
 
+        // 1. Clave canónica directa
+        if (allMap.containsKey(key) && allMap[key] is Map) {
+          final lim = allMap[key]['limite'];
+          if (lim is num && lim.toInt() >= 3) return lim.toInt();
+        }
+
+        // 2. Clave legada
+        if (legacyKey != key && allMap.containsKey(legacyKey) && allMap[legacyKey] is Map) {
+          final lim = allMap[legacyKey]['limite'];
+          if (lim is num && lim.toInt() >= 3) return lim.toInt();
+        }
+
+        // 3. Coincidencia por dirección limpia
         for (final entry in allMap.entries) {
           final v = entry.value;
           if (v is! Map) continue;
@@ -1444,8 +1495,10 @@ class AlarmSyncService {
 
     bool sentViaSdk = false;
     try {
-      await _db.ref('emergenciaActual').set(data).timeout(const Duration(seconds: 4));
-      await _db.ref('reportes').push().set(data).timeout(const Duration(seconds: 4));
+      await Future.wait([
+        _db.ref('emergenciaActual').set(data),
+        _db.ref('reportes').push().set(data),
+      ]).timeout(const Duration(seconds: 4));
       sentViaSdk = true;
     } catch (e) {
       debugPrint('Timeout o fallo de WebSocket al emitir alerta: $e. Usando HTTPS REST Fallback...');
@@ -1646,23 +1699,34 @@ class AlarmSyncService {
 
   Future<(bool, String)> getNeighborActiveStatus() async {
     if (neighborId == null || neighborId!.isEmpty) return (true, '');
+
+    // 1. Si ya se sabe en memoria que está desactivado, responder inmediatamente sin bloquear la app
+    if (!_cachedIsActive) {
+      return (false, _cachedInactiveReason);
+    }
+
+    // 2. Consulta rápida a caché local / red con timeout de 1.5s (no 6 segundos)
     try {
-      final snap = await _db.ref('vecinos/$neighborId').get().timeout(const Duration(seconds: 6));
-      if (!snap.exists || snap.value is! Map) return (true, '');
+      final snap = await _db.ref('vecinos/$neighborId').get().timeout(const Duration(milliseconds: 1500));
+      if (!snap.exists || snap.value is! Map) return (_cachedIsActive, _cachedInactiveReason);
       final data = Map<dynamic, dynamic>.from(snap.value as Map);
       if (data['activo'] == false) {
-        return (false, 'Tu cuenta ha sido desactivada por la administración comunitaria.');
+        _cachedIsActive = false;
+        _cachedInactiveReason = 'Tu cuenta ha sido desactivada por la administración comunitaria.';
+        return (false, _cachedInactiveReason);
       }
       final trial = getTrialStatus(data);
       if (trial['isExpired'] == true) {
-        return (
-          false,
-          'Tu período de prueba gratuito de 1 mes ha finalizado.\n\nPara seguir protegido y hacer sonar la alarma, solicita al Administrador que active tu Plan Definitivo.'
-        );
+        _cachedIsActive = false;
+        _cachedInactiveReason = 'Tu período de prueba gratuito de 1 mes ha finalizado.\n\nPara seguir protegido y hacer sonar la alarma, solicita al Administrador que active tu Plan Definitivo.';
+        return (false, _cachedInactiveReason);
       }
+      _cachedIsActive = true;
+      _cachedInactiveReason = '';
       return (true, '');
     } catch (_) {
-      return (true, '');
+      // En datos móviles con alta latencia, usar el estado ya cacheado para respuesta instantánea
+      return (_cachedIsActive, _cachedInactiveReason);
     }
   }
 
@@ -1746,14 +1810,25 @@ class AlarmSyncService {
   }
 
   Future<String> getAdminWhatsApp() async {
+    if (_cachedAdminWhatsApp.isNotEmpty && _cachedAdminWhatsApp != '+56912345678') {
+      return _cachedAdminWhatsApp;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final local = prefs.getString('admin_whatsapp');
+    if (local != null && local.isNotEmpty) {
+      _cachedAdminWhatsApp = local;
+      return local;
+    }
     try {
-      final snap = await _db.ref('config/admin_whatsapp').get().timeout(const Duration(seconds: 5));
+      final snap = await _db.ref('config/admin_whatsapp').get().timeout(const Duration(seconds: 2));
       if (snap.exists && snap.value != null && snap.value.toString().trim().isNotEmpty) {
-        return snap.value.toString().trim();
+        final val = snap.value.toString().trim();
+        _cachedAdminWhatsApp = val;
+        await prefs.setString('admin_whatsapp', val);
+        return val;
       }
     } catch (_) {}
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString('admin_whatsapp') ?? '+56912345678';
+    return _cachedAdminWhatsApp;
   }
 
   Future<void> setAdminWhatsApp(String phone) async {
@@ -1852,15 +1927,25 @@ class AlarmSyncService {
   }
 
   Future<String> getApkDownloadUrl() async {
+    if (_cachedApkDownloadUrl.isNotEmpty) {
+      return _cachedApkDownloadUrl;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getString('apk_download_url');
+    if (stored != null && stored.isNotEmpty) {
+      _cachedApkDownloadUrl = convertDriveToDirectDownload(stored);
+      return _cachedApkDownloadUrl;
+    }
     try {
-      final snap = await _db.ref('config/apk_download_url').get().timeout(const Duration(seconds: 5));
+      final snap = await _db.ref('config/apk_download_url').get().timeout(const Duration(seconds: 2));
       if (snap.exists && snap.value != null && snap.value.toString().trim().isNotEmpty) {
-        return convertDriveToDirectDownload(snap.value.toString().trim());
+        final val = convertDriveToDirectDownload(snap.value.toString().trim());
+        _cachedApkDownloadUrl = val;
+        await prefs.setString('apk_download_url', val);
+        return val;
       }
     } catch (_) {}
-    final prefs = await SharedPreferences.getInstance();
-    final stored = prefs.getString('apk_download_url') ?? 'https://github.com/alerta-vecinal/releases';
-    return convertDriveToDirectDownload(stored);
+    return 'https://github.com/alerta-vecinal/releases';
   }
 
   Future<void> setApkDownloadUrl(String url) async {
@@ -1938,14 +2023,25 @@ class AlarmSyncService {
   }
 
   Future<String> getSeguridadCiudadanaPhone() async {
+    if (_cachedSeguridadPhone.isNotEmpty && _cachedSeguridadPhone != '1414') {
+      return _cachedSeguridadPhone;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final local = prefs.getString('telefono_seguridad');
+    if (local != null && local.isNotEmpty) {
+      _cachedSeguridadPhone = local;
+      return local;
+    }
     try {
-      final snap = await _db.ref('config/telefono_seguridad').get().timeout(const Duration(seconds: 5));
+      final snap = await _db.ref('config/telefono_seguridad').get().timeout(const Duration(seconds: 2));
       if (snap.exists && snap.value != null && snap.value.toString().trim().isNotEmpty) {
-        return snap.value.toString().trim();
+        final val = snap.value.toString().trim();
+        _cachedSeguridadPhone = val;
+        await prefs.setString('telefono_seguridad', val);
+        return val;
       }
     } catch (_) {}
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString('telefono_seguridad') ?? '1414';
+    return _cachedSeguridadPhone;
   }
 
   Future<void> setSeguridadCiudadanaPhone(String phone) async {
@@ -2100,48 +2196,20 @@ class AlarmSyncService {
 
   Future<void> reconnect() async {
     try {
-      debugPrint('Forzando reconexión a Firebase...');
+      debugPrint('Reactivando socket de Firebase...');
       _db.goOnline();
 
-      // Asegurar sesión anónima si se cerró
+      // Asegurar sesión anónima en segundo plano si se cerró
       if (FirebaseAuth.instance.currentUser == null) {
-        await FirebaseAuth.instance.signInAnonymously().timeout(const Duration(seconds: 4));
-      }
-
-      // Sondeo activo inmediato del nodo de emergencia
-      final snap = await _db.ref('emergenciaActual').get().timeout(const Duration(seconds: 4));
-      if (snap.exists && snap.value is Map) {
-        final val = Map<dynamic, dynamic>.from(snap.value as Map);
-        if (val['tipo'] != null) {
-          _processIncomingAlertData(snap.key ?? 'active', val);
-        }
-      } else {
-        if (currentAlert != null) {
-          _processIncomingAlertData('none', null);
-        }
+        FirebaseAuth.instance.signInAnonymously().catchError((e) {
+          debugPrint('Auth reconnection notice: $e');
+          return null as dynamic;
+        });
       }
       isConnected = true;
       _connection.add(true);
     } catch (e) {
-      debugPrint('Reconexión WebSocket falló: $e. Probando fallback REST...');
-      try {
-        final url = Uri.parse('https://alerta-vecinal-coronel-default-rtdb.firebaseio.com/emergenciaActual.json');
-        final res = await http.get(url).timeout(const Duration(seconds: 3));
-        if (res.statusCode == 200 && res.body.isNotEmpty && res.body != 'null') {
-          final data = jsonDecode(res.body);
-          if (data is Map && data['tipo'] != null) {
-            _processIncomingAlertData('rest_fallback', Map<dynamic, dynamic>.from(data));
-          }
-        } else if (res.statusCode == 200 && (res.body == 'null' || res.body.isEmpty)) {
-          if (currentAlert != null) {
-            _processIncomingAlertData('none', null);
-          }
-        }
-        isConnected = true;
-        _connection.add(true);
-      } catch (_) {
-        // En caso de modo avión o sin red
-      }
+      debugPrint('Error en reconexión: $e');
     }
   }
 
